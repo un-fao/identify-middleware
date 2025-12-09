@@ -283,19 +283,12 @@ class IAPCookieValidator(IdentityValidator):
     async def validate(self, request: Any) -> Optional[UserIdentity]:
         logger.debug(f"IAPCookieValidator: Checking cookie '{self.cookie_name}'")
         iap_cookie = request.cookies.get(self.cookie_name)
-
         if not iap_cookie:
             for name, value in request.cookies.items():
                 if name.startswith(self.cookie_name):
                     logger.debug(f"IAPCookieValidator: Found suffixed cookie '{name}'")
                     iap_cookie = value
                     break
-            
-        logger.debug(f"IAPCookieValidator: Cookie found (len={len(iap_cookie)}). Verifying against audience '{self.audience}'")
-        iap_cookie = request.cookies.get(self.cookie_name)
-        if not iap_cookie:
-            logger.debug("IAPCookieValidator: Cookie not found.")
-            return None
             
         logger.debug(f"IAPCookieValidator: Cookie found (len={len(iap_cookie)}). Verifying against audience '{self.audience}'")
         try:
