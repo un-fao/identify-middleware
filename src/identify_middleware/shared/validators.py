@@ -283,6 +283,8 @@ class IAPCookieValidator(IdentityValidator):
     async def validate(self, request: Any) -> Optional[UserIdentity]:
         logger.debug(f"IAPCookieValidator: Checking cookie '{self.cookie_name}'")
         iap_cookie = request.cookies.get(self.cookie_name)
+        
+        # FIX: Handle IAP cookies with suffixes (e.g. __Host-GCP_IAP_AUTH_TOKEN_<HASH>)
         if not iap_cookie:
             for name, value in request.cookies.items():
                 if name.startswith(self.cookie_name):
@@ -291,7 +293,8 @@ class IAPCookieValidator(IdentityValidator):
                     break
                 
         if not iap_cookie:
-            logger.debug("IAPCookieValidator: Cookie not found.")
+            # DEBUG: Log available keys to assist debugging
+            logger.debug(f"IAPCookieValidator: Cookie not found. Available cookies: {list(request.cookies.keys())}")
             return None
             
         logger.debug(f"IAPCookieValidator: Cookie found (len={len(iap_cookie)}). Verifying against audience '{self.audience}'")
