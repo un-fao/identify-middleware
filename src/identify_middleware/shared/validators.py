@@ -289,6 +289,10 @@ class IAPCookieValidator(IdentityValidator):
                     logger.debug(f"IAPCookieValidator: Found suffixed cookie '{name}'")
                     iap_cookie = value
                     break
+                
+        if not iap_cookie:
+            logger.debug("IAPCookieValidator: Cookie not found.")
+            return None
             
         logger.debug(f"IAPCookieValidator: Cookie found (len={len(iap_cookie)}). Verifying against audience '{self.audience}'")
         try:
