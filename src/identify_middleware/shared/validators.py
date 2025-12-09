@@ -71,6 +71,7 @@ class SessionPersistenceValidator(IdentityValidator):
         user_identity_data = session.get("user")
         
         if user_identity_data and isinstance(user_identity_data, dict):
+            logger.debug("SessionPersistenceValidator: Found 'user' data in session.")
             try:
                 # If we optimized storage, we might be missing 'claims' in the session.
                 # We inject empty claims if missing to satisfy Pydantic if necessary,
@@ -82,14 +83,18 @@ class SessionPersistenceValidator(IdentityValidator):
                 check_token_expiration(
                     user_identity.model_dump(), self.expiration_threshold
                 )
+                logger.debug(f"SessionPersistenceValidator: Session valid for {user_identity.email}")
                 return user_identity
-            except IdentityException:
+            except IdentityException as ie:
+                logger.debug(f"SessionPersistenceValidator: Token expired in session: {ie}")
                 if isinstance(session, dict): session.pop("user", None)
                 else: del session["user"]
             except Exception as e:
-                logger.warning(f"Could not parse UserIdentity from session: {e}")
+                logger.warning(f"SessionPersistenceValidator: Could not parse UserIdentity from session: {e}")
                 if isinstance(session, dict): session.pop("user", None)
                 else: del session["user"]
+        else:
+            logger.debug("SessionPersistenceValidator: No user data found in session.")
         return None
 
 
@@ -100,9 +105,11 @@ class Oauth2Validator(IdentityValidator):
             raise ImportError("google-auth library required for Oauth2Validator. pip install google-auth")
 
     async def validate(self, request: Any) -> Optional[UserIdentity]:
+        logger.debug("Oauth2Validator: Attempting validation.")
         try:
             claims = receive_authorized_get_request(request)
             if claims and "email" in claims and "exp" in claims:
+                logger.debug(f"Oauth2Validator: Received valid claims for {claims['email']}")
                 # Extract raw token for record keeping
                 auth_header = request.headers.get("Authorization", "")
                 token = None
@@ -118,6 +125,11 @@ class Oauth2Validator(IdentityValidator):
                     token=token,
                 )
                 return user_identity
+            elif claims:
+                logger.debug("Oauth2Validator: Claims received but missing 'email' or 'exp'.")
+            else:
+                logger.debug("Oauth2Validator: No valid claims returned.")
+
         except Exception as e:
             if not isinstance(e, IdentityException):
                 logger.error(f"OAuth2 token validation failed: {e}")
@@ -150,11 +162,13 @@ class StaticAPIKeyValidator(IdentityValidator):
         key_from_header = request.headers.get(self.header_key)
         
         if not key_from_header:
+            logger.debug(f"StaticAPIKeyValidator: Header '{self.header_key}' not found.")
             return None
 
         user_email = self.key_map.get(key_from_header)
 
         if user_email:
+            logger.debug(f"StaticAPIKeyValidator: Key match found for {user_email}")
             # Calculate expiration based on configured TTL
             exp_time = int(time.time() + self.ttl)
             user_identity = UserIdentity(
@@ -171,6 +185,8 @@ class StaticAPIKeyValidator(IdentityValidator):
                 token=key_from_header,
             )
             return user_identity
+        
+        logger.debug("StaticAPIKeyValidator: API Key present but invalid.")
         return None
 
 
@@ -195,6 +211,7 @@ class CustomTokenValidator(IdentityValidator):
         token: str
         if self.scheme:
             if not token_from_header.lower().startswith(self.scheme):
+                logger.debug(f"CustomTokenValidator: Header present but schema '{self.scheme}' mismatch.")
                 return None
             token = token_from_header[self.scheme_len :]
         else:
@@ -208,7 +225,10 @@ class CustomTokenValidator(IdentityValidator):
             if user_identity:
                 if not user_identity.token:
                     user_identity.token = token
+                logger.debug(f"CustomTokenValidator: Auth callable success for {user_identity.email}")
                 return user_identity
+            else:
+                logger.debug("CustomTokenValidator: Auth callable returned None.")
         except Exception as e:
             logger.error(f"Error in CustomTokenValidator auth_callable: {e}")
         return None
@@ -223,9 +243,12 @@ class IAPTokenValidator(IdentityValidator):
         get_iap_public_keys()
 
     async def validate(self, request: Any) -> Optional[UserIdentity]:
+        logger.debug(f"IAPTokenValidator: Checking header '{self.authorization_header_key}'")
         apikey = request.headers.get(self.authorization_header_key)
         if apikey:
+            logger.debug(f"IAPTokenValidator: Header found (len={len(apikey)}). Verifying against audience '{self.audience}'")
             try:
+                # verify_iap_jwt now includes padding repair from jwt_utils
                 decoded_jwt = verify_iap_jwt(apikey, self.audience)
                 user_identity = UserIdentity(
                     id=decoded_jwt.get("sub", "unknown"),
@@ -235,12 +258,15 @@ class IAPTokenValidator(IdentityValidator):
                     provider="google-iap-token",
                     token=apikey,
                 )
+                logger.info(f"IAPTokenValidator: Validation successful for {user_identity.email}")
                 return user_identity
             except Exception as e:
                 if isinstance(e, IdentityException):
-                    logger.info(f"IAP token validation failed: {e.detail}")
+                    logger.info(f"IAPTokenValidator: Validation failed: {e.detail}")
                 else:
-                    logger.error(f"IAP token error: {e}")
+                    logger.error(f"IAPTokenValidator: Unexpected error: {e}")
+        else:
+            logger.debug("IAPTokenValidator: Header not found.")
         return None
 
 
@@ -255,18 +281,22 @@ class IAPCookieValidator(IdentityValidator):
             logger.warning("google-auth is installed, but google.auth.transport.requests is not available.")
 
     async def validate(self, request: Any) -> Optional[UserIdentity]:
+        logger.debug(f"IAPCookieValidator: Checking cookie '{self.cookie_name}'")
         iap_cookie = request.cookies.get(self.cookie_name)
         if not iap_cookie:
+            logger.debug("IAPCookieValidator: Cookie not found.")
             return None
             
+        logger.debug(f"IAPCookieValidator: Cookie found (len={len(iap_cookie)}). Verifying against audience '{self.audience}'")
         try:
             decoded_jwt = None
             # FIX: Prefer google-auth library for consistent validation if available
             if HAS_GOOGLE_AUTH and google_requests:
-                request_adapter = google_requests.Request()
-                # verify_oauth2_token handles the heavy lifting (signature, aud, exp)
-                decoded_jwt = verify_oauth2_token(iap_cookie, request_adapter, audience=self.audience)
+                logger.debug("IAPCookieValidator: Using google-auth verify_iap_jwt (robust path).")
+                # We call verify_iap_jwt because it now contains the padding fix
+                decoded_jwt = verify_iap_jwt(iap_cookie, self.audience)
             else:
+                logger.debug("IAPCookieValidator: Using local jose fallback.")
                 # Fallback to local 'jose' validation
                 decoded_jwt = verify_iap_cookie_jwt(iap_cookie, self.audience)
 
@@ -278,10 +308,11 @@ class IAPCookieValidator(IdentityValidator):
                 provider="google-iap-cookie",
                 token=iap_cookie,
             )
+            logger.info(f"IAPCookieValidator: Validation successful for {user_identity.email}")
             return user_identity
         except Exception as e:
             # Generic catch for both google-auth errors and jose errors
-            logger.info(f"IAP cookie validation failed: {e}")
+            logger.info(f"IAPCookieValidator: Validation failed: {e}")
         return None
 
 import base64
@@ -290,26 +321,22 @@ import binascii
 class GoogleGatewayValidator(IdentityValidator):
     """
     Validates identity passed by Google Cloud API Gateway or Cloud Endpoints.
-    
-    When the Gateway is configured with a security definition (firebase, auth0, 
-    google_id_token, etc.), it validates the JWT at the edge.
-    It then forwards the request to the backend with the 'X-Apigateway-Api-Userinfo' 
-    header containing the base64 encoded claims (sub, email, etc.).
     """
 
     def __init__(self, header_key: str = "X-Apigateway-Api-Userinfo"):
         self.header_key = header_key
 
     async def validate(self, request: Any) -> Optional[UserIdentity]:
+        logger.debug(f"GoogleGatewayValidator: Checking header '{self.header_key}'")
         # 1. Get the header injected by the Gateway
         user_info_b64 = request.headers.get(self.header_key)
         
         if not user_info_b64:
+            logger.debug("GoogleGatewayValidator: Header not found.")
             return None
 
         try:
             # 2. Fix Base64 Padding
-            # Google sometimes sends unpadded base64url strings
             user_info_b64 += "=" * ((4 - len(user_info_b64) % 4) % 4)
             
             # 3. Decode
@@ -318,24 +345,21 @@ class GoogleGatewayValidator(IdentityValidator):
             user_info = json.loads(user_info_str)
 
             # 4. Map to UserIdentity
-            # API Gateway has already validated expiration (exp), so we trust it.
-            # We set a short internal expiration (300s) just for the object life.
             user_identity = UserIdentity(
                 id=user_info.get("sub", "unknown"),
-                # API Gateway mapping varies. Try 'email' then fallback to 'sub'
                 email=user_info.get("email", user_info.get("sub")),
                 exp=int(time.time() + 300), 
                 provider="google-api-gateway",
                 claims=user_info,
-                token=None # The gateway usually strips the original Authorization header
+                token=None 
             )
             
-            logger.info(f"Gateway API validation succeeded for {user_identity.email}")
+            logger.info(f"GoogleGatewayValidator: Success for {user_identity.email}")
             return user_identity
 
         except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as e:
-            logger.warning(f"Failed to decode Gateway header: {e}")
+            logger.warning(f"GoogleGatewayValidator: Failed to decode Gateway header: {e}")
             return None
         except Exception as e:
-            logger.error(f"Unexpected error in GoogleGatewayValidator: {e}")
+            logger.error(f"GoogleGatewayValidator: Unexpected error: {e}")
             return None
