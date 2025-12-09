@@ -245,10 +245,14 @@ class IAPTokenValidator(IdentityValidator):
 
 
 class IAPCookieValidator(IdentityValidator):
-    def __init__(self, audience: str, cookie_name: str = "GCP_IAP_UID"):
+    def __init__(self, audience: str, cookie_name: str = "__Host-GCP_IAP_AUTH_TOKEN"):
         self.audience = audience
         self.cookie_name = cookie_name
-        get_iap_public_keys()
+        # Pre-fetch keys only if google-auth is not available, as it's the fallback
+        if not HAS_GOOGLE_AUTH:
+            get_iap_public_keys()
+        elif not google_requests:
+            logger.warning("google-auth is installed, but google.auth.transport.requests is not available.")
 
     async def validate(self, request: Any) -> Optional[UserIdentity]:
         iap_cookie = request.cookies.get(self.cookie_name)
@@ -256,24 +260,15 @@ class IAPCookieValidator(IdentityValidator):
             return None
             
         try:
-            # TODO use decode_iap_jwt() when google-auth adds support for IAP cookies
-            from identify_middleware.shared.jwt_utils import decode_iap_jwt
             decoded_jwt = None
-            try:
-                decoded_jwt = decode_iap_jwt(iap_cookie)
-                logger.debug(f"decoded cookie: {decoded_jwt}")
-            except Exception as e:
-                logger.debug(f"decode_iap_jwt failed: {e}")
-
-            if not decoded_jwt:
-                # FIX: Prefer google-auth library for consistent validation if available
-                if HAS_GOOGLE_AUTH and google_requests:
-                    request_adapter = google_requests.Request()
-                    # verify_oauth2_token handles the heavy lifting (signature, aud, exp)
-                    decoded_jwt = verify_oauth2_token(iap_cookie, request_adapter, audience=self.audience)
-                else:
-                    # Fallback to local 'jose' validation
-                    decoded_jwt = verify_iap_cookie_jwt(iap_cookie, self.audience)
+            # FIX: Prefer google-auth library for consistent validation if available
+            if HAS_GOOGLE_AUTH and google_requests:
+                request_adapter = google_requests.Request()
+                # verify_oauth2_token handles the heavy lifting (signature, aud, exp)
+                decoded_jwt = verify_oauth2_token(iap_cookie, request_adapter, audience=self.audience)
+            else:
+                # Fallback to local 'jose' validation
+                decoded_jwt = verify_iap_cookie_jwt(iap_cookie, self.audience)
 
             user_identity = UserIdentity(
                 id=decoded_jwt.get("sub", "unknown"),
