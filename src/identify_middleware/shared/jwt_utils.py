@@ -44,6 +44,15 @@ class IdentityException(Exception):
         self.detail = detail
         super().__init__(f"[{status_code}] {detail}")
 
+class RedirectRequiredException(Exception):
+    """
+    Raised when the validator determines the user needs to be redirected 
+    (e.g. to the IAP Proxy for token renewal).
+    """
+    def __init__(self, url: str):
+        self.url = url
+        super().__init__(f"Redirect required to: {url}")
+
 IAP_PUBLIC_KEYS_URL = "https://www.gstatic.com/iap/verify/public_key-jwk"
 
 def repair_jwt_padding(token: str) -> str:

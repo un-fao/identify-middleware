@@ -19,6 +19,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Awaitable, Union, Mapping, Any
+from urllib.parse import quote
 
 from identify_middleware.shared.models import UserIdentity
 from identify_middleware.shared.jwt_utils import (
@@ -28,6 +29,7 @@ from identify_middleware.shared.jwt_utils import (
     verify_iap_jwt,
     receive_authorized_get_request,
     IdentityException,
+    RedirectRequiredException,
 )
 
 # Import google auth components if available for the robust cookie validator fix
@@ -269,11 +271,19 @@ class IAPTokenValidator(IdentityValidator):
             logger.debug("IAPTokenValidator: Header not found.")
         return None
 
-
 class IAPCookieValidator(IdentityValidator):
-    def __init__(self, audience: str, cookie_name: str = "__Host-GCP_IAP_AUTH_TOKEN"):
+    # FIX: Default to 'IAP_JWT' or your preferred custom cookie name to support local dev/redirection flows.
+    # The default '__Host-GCP_IAP_AUTH_TOKEN' is encrypted and CANNOT be validated by this service directly.
+    def __init__(
+        self, 
+        audience: str, 
+        cookie_name: str = "IAP_JWT",
+        iap_proxy_url: Optional[str] = None
+    ):
         self.audience = audience
         self.cookie_name = cookie_name
+        self.iap_proxy_url = iap_proxy_url
+        
         # Pre-fetch keys only if google-auth is not available, as it's the fallback
         if not HAS_GOOGLE_AUTH:
             get_iap_public_keys()
@@ -281,10 +291,18 @@ class IAPCookieValidator(IdentityValidator):
             logger.warning("google-auth is installed, but google.auth.transport.requests is not available.")
 
     async def validate(self, request: Any) -> Optional[UserIdentity]:
+        """
+        Validates the IAP JWT stored in a cookie.
+        
+        RENEWAL LOGIC:
+        If validation fails (specifically expiration or invalid token) AND 'iap_proxy_url' is set,
+        this method raises a RedirectRequiredException instead of returning None.
+        The middleware catches this and sends a 302 to the client.
+        """
         logger.debug(f"IAPCookieValidator: Checking cookie '{self.cookie_name}'")
         iap_cookie = request.cookies.get(self.cookie_name)
         
-        # FIX: Handle IAP cookies with suffixes (e.g. __Host-GCP_IAP_AUTH_TOKEN_<HASH>)
+        # Handle suffixes if using the standard GCP name (though it won't work for validation)
         if not iap_cookie:
             for name, value in request.cookies.items():
                 if name.startswith(self.cookie_name):
@@ -293,8 +311,10 @@ class IAPCookieValidator(IdentityValidator):
                     break
                 
         if not iap_cookie:
-            # DEBUG: Log available keys to assist debugging
-            logger.debug(f"IAPCookieValidator: Cookie not found. Available cookies: {list(request.cookies.keys())}")
+            # If no cookie exists at all, we might also want to trigger redirect if strict mode
+            # But usually we return None to allow other validators (like Bearer tokens) to try.
+            # If all fail, the middleware can decide what to do (401 or redirect).
+            logger.debug(f"IAPCookieValidator: Cookie not found.")
             return None
             
         logger.debug(f"IAPCookieValidator: Cookie found (len={len(iap_cookie)}). Verifying against audience '{self.audience}'")
@@ -320,9 +340,26 @@ class IAPCookieValidator(IdentityValidator):
             )
             logger.info(f"IAPCookieValidator: Validation successful for {user_identity.email}")
             return user_identity
+        
         except Exception as e:
-            # Generic catch for both google-auth errors and jose errors
+            # If validation fails (expired/invalid) and we have a proxy URL configured,
+            # we should instruct the client to renew.
+            if self.iap_proxy_url:
+                try:
+                    # Construct full redirect URL
+                    # e.g. https://proxy/iap-proxy?redirect_uri=https://backend/api/data
+                    current_url = str(request.url)
+                    separator = "&" if "?" in self.iap_proxy_url else "?"
+                    final_url = f"{self.iap_proxy_url}{separator}redirect_uri={quote(current_url)}"
+                    
+                    logger.info(f"IAPCookieValidator: Token expired/invalid. Triggering redirect to: {final_url}")
+                    raise RedirectRequiredException(final_url)
+                except AttributeError:
+                    logger.warning("IAPCookieValidator: Could not determine request URL for redirect.")
+            
+            # Generic catch if no proxy URL or other error
             logger.info(f"IAPCookieValidator: Validation failed: {e}")
+
         return None
 
 import base64
@@ -373,3 +410,34 @@ class GoogleGatewayValidator(IdentityValidator):
         except Exception as e:
             logger.error(f"GoogleGatewayValidator: Unexpected error: {e}")
             return None
+class RequestDebuggerValidator(IdentityValidator):
+    """
+    A validator that logs request details for debugging purposes.
+    """
+
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
+        logger.debug("RequestDebuggerValidator: Logging request details for debugging.")
+        try:
+            # Log headers
+            headers = dict(request.headers)
+            logger.debug(f"Request Headers: {headers}")
+
+            # Log cookies
+            cookies = request.cookies
+            logger.debug(f"Request Cookies: {cookies}")
+
+            # Log query parameters
+            query_params = dict(request.query_params)
+            logger.debug(f"Query Parameters: {query_params}")
+
+            # Log session data if available
+            session = getattr(request, "session", None)
+            if session is not None:
+                logger.debug(f"Session Data: {session}")
+            else:
+                logger.debug("No session data available in request.")
+
+        except Exception as e:
+            logger.error(f"RequestDebuggerValidator: Error while logging request details: {e}")
+
+        return None
