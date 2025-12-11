@@ -47,7 +47,7 @@ class IdentityException(Exception):
 class RedirectRequiredException(Exception):
     """
     Raised when the validator determines the user needs to be redirected 
-    (e.g. to the IAP Proxy for token renewal).
+    (e.g. to the IAP Proxy for token renewal/acquisition).
     """
     def __init__(self, url: str):
         self.url = url
@@ -58,24 +58,19 @@ IAP_PUBLIC_KEYS_URL = "https://www.gstatic.com/iap/verify/public_key-jwk"
 def repair_jwt_padding(token: str) -> str:
     """
     Ensures that a JWT string has the correct padding for its base64 segments.
-    IAP tokens are often stripped of padding, which causes python's base64 lib to crash.
     """
     if not token:
         return token
-        
     try:
         parts = token.split('.')
-        # A standard JWT has 3 parts: header.payload.signature
         if len(parts) != 3:
-            return token # Return as-is, let the validator fail naturally if malformed
-            
+            return token 
         repaired_parts = []
         for part in parts:
             missing_padding = len(part) % 4
             if missing_padding:
                 part += '=' * (4 - missing_padding)
             repaired_parts.append(part)
-            
         return ".".join(repaired_parts)
     except Exception:
         return token
@@ -91,23 +86,18 @@ def check_token_expiration(decoded_jwt: Mapping[str, Any], threshold: int = 300)
         )
 
 def verify_iap_jwt(iap_jwt: str, audience: str) -> dict:
-    # This function explicitly requires google-auth
     if not verify_oauth2_token or not GoogleAuthRequest:
         raise ImportError("google-auth library required for verify_iap_jwt.")
     try:
-        # Fix padding before passing to google-auth
-        # (Though google-auth is usually robust, explicit fixing prevents edge cases)
         clean_jwt = repair_jwt_padding(iap_jwt)
-        
         google_request = GoogleAuthRequest()
         decoded_jwt = verify_oauth2_token(
             id_token=clean_jwt, request=google_request, audience=audience
         )
         return decoded_jwt
     except ValueError as e:
-        # Catch padding errors explicitly
         if "padding" in str(e).lower():
-             logger.error("Padding error detected in verify_iap_jwt even after repair attempt.")
+             logger.error("Padding error detected in verify_iap_jwt.")
         raise IdentityException(
             status_code=403, detail=f"Unauthorized: Invalid IAP token ({str(e)})"
         ) from e
@@ -118,7 +108,6 @@ def verify_iap_jwt(iap_jwt: str, audience: str) -> dict:
 @lru_cache(maxsize=1)
 def get_iap_public_keys() -> dict:
     try:
-        # Sync call is acceptable here as it is cached lru(1) and meant for startup/fallback
         with httpx.Client(timeout=10) as client:
             response = client.get(IAP_PUBLIC_KEYS_URL)
             response.raise_for_status()
@@ -127,37 +116,10 @@ def get_iap_public_keys() -> dict:
         logger.error(f"Error fetching IAP public keys: {e}")
         raise IdentityException(status_code=500, detail="Could not fetch IAP public keys.") from e
 
-def decode_iap_jwt(token):
-    """
-    Manually decodes a JWT payload without verifying signature. 
-    Useful for debugging or extracting claims when signature is validated elsewhere.
-    """
-    parts = token.split('.')
-    if len(parts) < 2:
-        raise ValueError("Invalid Token Format")
-        
-    payload = parts[1]
-    
-    # Calculate missing padding
-    missing_padding = len(payload) % 4
-    if missing_padding:
-        payload += '=' * (4 - missing_padding)
-    
-    # Now decode
-    decoded_bytes = base64.urlsafe_b64decode(payload)
-    return json.loads(decoded_bytes)
-
 def verify_iap_cookie_jwt(iap_jwt_cookie: str, audience: str) -> dict:
-    """
-    Verifies the IAP JWT using local `jose` library. 
-    This is the fallback method if google-auth is not used.
-    """
     try:
         public_keys = get_iap_public_keys()
-        
-        # Fix padding for jose
         clean_jwt = repair_jwt_padding(iap_jwt_cookie)
-        
         decoded_jwt = jwt.decode(
             clean_jwt,
             public_keys,
@@ -176,7 +138,6 @@ def verify_iap_cookie_jwt(iap_jwt_cookie: str, audience: str) -> dict:
 def receive_authorized_get_request(request: Any) -> Optional[dict]:
     if not id_token or not requests:
          return None
-         
     auth_header = request.headers.get("Authorization")
     if auth_header:
         try:
@@ -186,9 +147,7 @@ def receive_authorized_get_request(request: Any) -> Optional[dict]:
 
         if auth_type.lower() == "bearer":
             try:
-                # Ensure we handle padding for standard OIDC headers too
                 creds = repair_jwt_padding(creds)
-                
                 claims = id_token.verify_oauth2_token(creds, requests.Request())
                 if "email" not in claims and "sub" in claims:
                     claims["email"] = claims["sub"]

@@ -99,7 +99,6 @@ class SessionPersistenceValidator(IdentityValidator):
             logger.debug("SessionPersistenceValidator: No user data found in session.")
         return None
 
-
 class Oauth2Validator(IdentityValidator):
     def __init__(self):
         # FIX: Dependency Check
@@ -138,7 +137,6 @@ class Oauth2Validator(IdentityValidator):
             else:
                 logger.info(f"OAuth2 token validation failed: {e.detail}")
         return None
-
 
 class StaticAPIKeyValidator(IdentityValidator):
     def __init__(
@@ -237,7 +235,7 @@ class CustomTokenValidator(IdentityValidator):
 
 
 class IAPTokenValidator(IdentityValidator):
-    def __init__(self, audience: str, authorization_header_key: str = "X-Goog-Iap-Jwt-Assertion"):
+    def __init__(self, audience: str, authorization_header_key: str = "x-goog-iap-jwt-assertion"):
         if not HAS_GOOGLE_AUTH:
             raise ImportError("google-auth library required for IAPTokenValidator.")
         self.audience = audience
@@ -272,62 +270,71 @@ class IAPTokenValidator(IdentityValidator):
         return None
 
 class IAPCookieValidator(IdentityValidator):
-    # FIX: Default to 'IAP_JWT' or your preferred custom cookie name to support local dev/redirection flows.
-    # The default '__Host-GCP_IAP_AUTH_TOKEN' is encrypted and CANNOT be validated by this service directly.
     def __init__(
         self, 
         audience: str, 
-        cookie_name: str = "IAP_JWT",
-        iap_proxy_url: Optional[str] = None
+        cookie_name: str = "x-goog-iap-jwt-assertion",
+        iap_proxy_url: Optional[str] = None,
+        upstream_cookie_name: str = "__Host-GCP_IAP_AUTH_TOKEN"
     ):
+        """
+        Args:
+            cookie_name: The readable JWT cookie set by your Nginx proxy.
+            iap_proxy_url: The URL to redirect to for token acquisition/renewal.
+            upstream_cookie_name: The encrypted IAP cookie set by Google. Used to detect
+                                  if user is logged in via IAP but missing our readable token.
+        """
         self.audience = audience
         self.cookie_name = cookie_name
         self.iap_proxy_url = iap_proxy_url
+        self.upstream_cookie_name = upstream_cookie_name
         
-        # Pre-fetch keys only if google-auth is not available, as it's the fallback
         if not HAS_GOOGLE_AUTH:
             get_iap_public_keys()
-        elif not google_requests:
-            logger.warning("google-auth is installed, but google.auth.transport.requests is not available.")
 
+    def _trigger_redirect(self, request: Any, reason: str):
+        if self.iap_proxy_url:
+            try:
+                current_url = str(request.url)
+                separator = "&" if "?" in self.iap_proxy_url else "?"
+                final_url = f"{self.iap_proxy_url}{separator}redirect_uri={quote(current_url)}"
+                logger.info(f"IAPCookieValidator: {reason}. Redirecting to: {final_url}")
+                raise RedirectRequiredException(final_url)
+            except AttributeError:
+                logger.warning("IAPCookieValidator: Could not determine request URL for redirect.")
+    
     async def validate(self, request: Any) -> Optional[UserIdentity]:
-        """
-        Validates the IAP JWT stored in a cookie.
-        
-        RENEWAL LOGIC:
-        If validation fails (specifically expiration or invalid token) AND 'iap_proxy_url' is set,
-        this method raises a RedirectRequiredException instead of returning None.
-        The middleware catches this and sends a 302 to the client.
-        """
-        logger.debug(f"IAPCookieValidator: Checking cookie '{self.cookie_name}'")
+        # 1. Try to find our readable JWT cookie
         iap_cookie = request.cookies.get(self.cookie_name)
-        
-        # Handle suffixes if using the standard GCP name (though it won't work for validation)
         if not iap_cookie:
             for name, value in request.cookies.items():
                 if name.startswith(self.cookie_name):
-                    logger.debug(f"IAPCookieValidator: Found suffixed cookie '{name}'")
                     iap_cookie = value
                     break
-                
+        
+        # 2. If missing readable cookie, check for Upstream Encrypted Cookie
         if not iap_cookie:
-            # If no cookie exists at all, we might also want to trigger redirect if strict mode
-            # But usually we return None to allow other validators (like Bearer tokens) to try.
-            # If all fail, the middleware can decide what to do (401 or redirect).
-            logger.debug(f"IAPCookieValidator: Cookie not found.")
-            return None
+            has_upstream = False
+            if request.cookies.get(self.upstream_cookie_name):
+                has_upstream = True
+            else:
+                 for name in request.cookies:
+                     if name.startswith(self.upstream_cookie_name):
+                         has_upstream = True
+                         break
             
-        logger.debug(f"IAPCookieValidator: Cookie found (len={len(iap_cookie)}). Verifying against audience '{self.audience}'")
+            if has_upstream:
+                # User has IAP session but no readable token -> Redirect to exchange
+                self._trigger_redirect(request, "Upstream IAP cookie found but local token missing")
+            
+            return None
+
+        # 3. Verify the readable JWT
         try:
             decoded_jwt = None
-            # FIX: Prefer google-auth library for consistent validation if available
             if HAS_GOOGLE_AUTH and google_requests:
-                logger.debug("IAPCookieValidator: Using google-auth verify_iap_jwt (robust path).")
-                # We call verify_iap_jwt because it now contains the padding fix
                 decoded_jwt = verify_iap_jwt(iap_cookie, self.audience)
             else:
-                logger.debug("IAPCookieValidator: Using local jose fallback.")
-                # Fallback to local 'jose' validation
                 decoded_jwt = verify_iap_cookie_jwt(iap_cookie, self.audience)
 
             user_identity = UserIdentity(
@@ -338,29 +345,16 @@ class IAPCookieValidator(IdentityValidator):
                 provider="google-iap-cookie",
                 token=iap_cookie,
             )
-            logger.info(f"IAPCookieValidator: Validation successful for {user_identity.email}")
             return user_identity
         
+        except IdentityException as ie:
+            # Token expired or invalid -> Redirect to renew
+            self._trigger_redirect(request, f"Token invalid/expired: {ie.detail}")
+            return None
         except Exception as e:
-            # If validation fails (expired/invalid) and we have a proxy URL configured,
-            # we should instruct the client to renew.
-            if self.iap_proxy_url:
-                try:
-                    # Construct full redirect URL
-                    # e.g. https://proxy/iap-proxy?redirect_uri=https://backend/api/data
-                    current_url = str(request.url)
-                    separator = "&" if "?" in self.iap_proxy_url else "?"
-                    final_url = f"{self.iap_proxy_url}{separator}redirect_uri={quote(current_url)}"
-                    
-                    logger.info(f"IAPCookieValidator: Token expired/invalid. Triggering redirect to: {final_url}")
-                    raise RedirectRequiredException(final_url)
-                except AttributeError:
-                    logger.warning("IAPCookieValidator: Could not determine request URL for redirect.")
-            
-            # Generic catch if no proxy URL or other error
             logger.info(f"IAPCookieValidator: Validation failed: {e}")
+            return None
 
-        return None
 
 import base64
 import json
