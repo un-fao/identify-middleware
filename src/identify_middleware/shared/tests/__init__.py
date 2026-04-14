@@ -15,8 +15,3 @@
 #    Author: Carlo Cancellieri (ccancellieri@gmail.com)
 #    Company: FAO, Viale delle Terme di Caracalla, 00100 Rome, Italy
 #    Contact: copyright@fao.org - http://fao.org/contact-us/terms/en/
-
-# requirements.txt
-# pytest==8.3.3
-# For development, install the library with all extras:
-# pip install -e .[all]

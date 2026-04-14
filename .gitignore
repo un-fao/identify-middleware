@@ -93,7 +93,7 @@ wheels/
 *.spec
 
 # Installer logs
-pip-log.txt
+pip-logger.txt
 pip-delete-this-directory.txt
 
 # Unit test / coverage reports

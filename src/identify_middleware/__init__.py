@@ -16,7 +16,17 @@
 #    Company: FAO, Viale delle Terme di Caracalla, 00100 Rome, Italy
 #    Contact: copyright@fao.org - http://fao.org/contact-us/terms/en/
 
-# requirements.txt
-# pytest==8.3.3
-# For development, install the library with all extras:
-# pip install -e .[all]
+import logging
+logger = logging.getLogger(__name__)
+
+try:
+    import fastapi
+    from identify_middleware.fastapi_middleware import *
+except ImportError:
+    logger.info("Fastapi not installed.")
+    
+try:
+    import flask
+    from identify_middleware.flask_middleware import *
+except ImportError:
+    logger.info("Flask not installed.")

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "identify_middleware"
+version = "0.3.0"
+description = "Identify Middleware for GCP Applications"
+authors = [
+    { name = "Carlo Cancellieri", email = "ccancellieri@gmail.com" },
+]
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+# The default installation includes fastapi and google extras
+dependencies = [
+    "httpx>=0.27.0",
+    "pyjwt[crypto]>=2.8.0",
+    "pydantic>=2.0"
+]
+[project.optional-dependencies]
+google = ["google-auth>=2.20.0"]
+fastapi = ["fastapi>=0.110.0", "starlette-session>=0.2.0"]
+flask = ["flask>=3.0.0", "Flask-Session>=0.6.0"]
+redis = ["redis>=5.0.0"]
+database = ["sqlalchemy>=2.0.0"]
+all = [
+    "identify_middleware[google]",
+    "identify_middleware[fastapi]",
+    "identify_middleware[flask]",
+    "identify_middleware[redis]",
+    "identify_middleware[database]",
+]
+default = ["identify_middleware[fastapi]", "identify_middleware[google]"]
+testing = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["identify_middleware*"]
