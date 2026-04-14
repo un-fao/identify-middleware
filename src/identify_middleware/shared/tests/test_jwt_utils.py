@@ -21,9 +21,9 @@ import pytest
 import time
 from unittest.mock import patch, Mock
 import httpx
-from jose import jwt, exceptions
+import jwt
 
-from utils.jwt_utils import (
+from identify_middleware.shared.jwt_utils import (
     check_token_expiration, 
     verify_iap_jwt, 
     verify_iap_cookie_jwt, 
@@ -61,24 +61,24 @@ def test_missing_exp_claim():
 
 
 # Tests for `verify_iap_jwt`
-@patch("utils.jwt_utils.verify_oauth2_token")
-@patch("utils.jwt_utils.GoogleAuthRequest")
+@patch("identify_middleware.shared.jwt_utils.verify_oauth2_token")
+@patch("identify_middleware.shared.jwt_utils.GoogleAuthRequest")
 def test_verify_iap_jwt_success(mock_google_request, mock_verify_oauth2_token):
     mock_verify_oauth2_token.return_value = {"exp": time.time() + 3600}
     decoded_jwt = verify_iap_jwt("valid-token", "test-audience")
     assert decoded_jwt["exp"] > time.time()
 
 
-@patch("utils.jwt_utils.verify_oauth2_token")
-@patch("utils.jwt_utils.GoogleAuthRequest")
+@patch("identify_middleware.shared.jwt_utils.verify_oauth2_token")
+@patch("identify_middleware.shared.jwt_utils.GoogleAuthRequest")
 def test_verify_iap_jwt_expired(mock_google_request, mock_verify_oauth2_token):
     mock_verify_oauth2_token.side_effect = ValueError("Token has expired")
     with pytest.raises(IdentityException, match="Unauthorized: Invalid IAP token"):
         verify_iap_jwt("expired-token", "test-audience")
 
 
-@patch("utils.jwt_utils.verify_oauth2_token")
-@patch("utils.jwt_utils.GoogleAuthRequest")
+@patch("identify_middleware.shared.jwt_utils.verify_oauth2_token")
+@patch("identify_middleware.shared.jwt_utils.GoogleAuthRequest")
 def test_verify_iap_jwt_invalid_token(mock_google_request, mock_verify_oauth2_token):
     mock_verify_oauth2_token.side_effect = ValueError("Signature verification failed")
     with pytest.raises(IdentityException, match="Unauthorized: Invalid IAP token"):
@@ -86,7 +86,7 @@ def test_verify_iap_jwt_invalid_token(mock_google_request, mock_verify_oauth2_to
 
 
 # Tests for `get_iap_public_keys`
-@patch("utils.jwt_utils.httpx.Client")
+@patch("identify_middleware.shared.jwt_utils.httpx.Client")
 def test_get_iap_public_keys_success(mock_client):
     mock_response = Mock()
     mock_response.status_code = 200
@@ -109,7 +109,7 @@ def test_get_iap_public_keys_success(mock_client):
     mock_client.return_value.__enter__.return_value.get.assert_called_once()
 
 
-@patch("utils.jwt_utils.httpx.Client")
+@patch("identify_middleware.shared.jwt_utils.httpx.Client")
 def test_get_iap_public_keys_failure(mock_client):
     mock_client.return_value.__enter__.return_value.get.side_effect = httpx.RequestError("Network error", request=Mock())
     
@@ -123,10 +123,14 @@ def test_get_iap_public_keys_failure(mock_client):
 
 
 # Tests for `verify_iap_cookie_jwt`
-@patch("utils.jwt_utils.get_iap_public_keys")
-@patch("utils.jwt_utils.jwt.decode")
-def test_verify_iap_cookie_jwt_success(mock_jwt_decode, mock_get_iap_public_keys):
-    mock_get_iap_public_keys.return_value = {"keys": []}
+@patch("identify_middleware.shared.jwt_utils.ECAlgorithm.from_jwk")
+@patch("identify_middleware.shared.jwt_utils.get_iap_public_keys")
+@patch("identify_middleware.shared.jwt_utils.jwt.get_unverified_header")
+@patch("identify_middleware.shared.jwt_utils.jwt.decode")
+def test_verify_iap_cookie_jwt_success(mock_jwt_decode, mock_get_header, mock_get_iap_public_keys, mock_from_jwk):
+    mock_get_header.return_value = {"kid": "k1"}
+    mock_get_iap_public_keys.return_value = [{"kid": "k1", "kty": "EC"}]
+    mock_from_jwk.return_value = Mock()
     mock_jwt_decode.return_value = {"email": "test@example.com", "exp": time.time() + 3600}
 
     decoded_jwt = verify_iap_cookie_jwt("valid-cookie-jwt", "test-audience")
@@ -134,19 +138,23 @@ def test_verify_iap_cookie_jwt_success(mock_jwt_decode, mock_get_iap_public_keys
     mock_jwt_decode.assert_called_once()
 
 
-@patch("utils.jwt_utils.get_iap_public_keys")
-@patch("utils.jwt_utils.jwt.decode")
-def test_verify_iap_cookie_jwt_invalid(mock_jwt_decode, mock_get_iap_public_keys):
-    mock_get_iap_public_keys.return_value = {"keys": []}
-    mock_jwt_decode.side_effect = exceptions.JWTError("Invalid signature")
+@patch("identify_middleware.shared.jwt_utils.ECAlgorithm.from_jwk")
+@patch("identify_middleware.shared.jwt_utils.get_iap_public_keys")
+@patch("identify_middleware.shared.jwt_utils.jwt.get_unverified_header")
+@patch("identify_middleware.shared.jwt_utils.jwt.decode")
+def test_verify_iap_cookie_jwt_invalid(mock_jwt_decode, mock_get_header, mock_get_iap_public_keys, mock_from_jwk):
+    mock_get_header.return_value = {"kid": "k1"}
+    mock_get_iap_public_keys.return_value = [{"kid": "k1", "kty": "EC"}]
+    mock_from_jwk.return_value = Mock()
+    mock_jwt_decode.side_effect = jwt.InvalidTokenError("Invalid signature")
 
     with pytest.raises(IdentityException, match="Unauthorized: Invalid IAP cookie token"):
         verify_iap_cookie_jwt("invalid-cookie-jwt", "test-audience")
 
 
 # Tests for `receive_authorized_get_request`
-@patch("utils.jwt_utils.id_token.verify_oauth2_token")
-@patch("utils.jwt_utils.requests.Request")
+@patch("identify_middleware.shared.jwt_utils.id_token.verify_oauth2_token")
+@patch("identify_middleware.shared.jwt_utils.requests.Request")
 def test_receive_auth_get_request_success(mock_google_request, mock_verify_oauth2_token):
     mock_request = Mock()
     mock_request.headers = {"Authorization": "Bearer valid-token"}
@@ -156,8 +164,8 @@ def test_receive_auth_get_request_success(mock_google_request, mock_verify_oauth
     assert claims["email"] == "user@example.com"
 
 
-@patch("utils.jwt_utils.id_token.verify_oauth2_token")
-@patch("utils.jwt_utils.requests.Request")
+@patch("identify_middleware.shared.jwt_utils.id_token.verify_oauth2_token")
+@patch("identify_middleware.shared.jwt_utils.requests.Request")
 def test_receive_auth_get_request_expired(mock_google_request, mock_verify_oauth2_token):
     mock_request = Mock()
     mock_request.headers = {"Authorization": "Bearer expired-token"}

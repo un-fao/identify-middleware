@@ -1,9 +1,28 @@
+#    Copyright 2025 FAO
+#
+#    Licensed under the Apache License, Version 2.0 (the "License");
+#    you may not use this file except in compliance with the License.
+#    You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#    Unless required by applicable law or agreed to in writing, software
+#    distributed under the License is distributed on an "AS IS" BASIS,
+#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#    See the License for the specific language governing permissions and
+#    limitations under the License.
+#
+#    Author: Carlo Cancellieri (ccancellieri@gmail.com)
+#    Company: FAO, Viale delle Terme di Caracalla, 00100 Rome, Italy
+#    Contact: copyright@fao.org - http://fao.org/contact-us/terms/en/
+
+import json
 import logging
 import time
 from typing import Optional, Any, Dict, List
 import httpx
-from jose import jwt, jwk
-from jose.utils import base64url_decode
+import jwt
+from jwt.algorithms import RSAAlgorithm, ECAlgorithm
 
 from identify_middleware.shared.models import UserIdentity
 from identify_middleware.shared.validators import IdentityValidator
@@ -91,12 +110,23 @@ class OIDCTokenValidator(IdentityValidator):
 
             # 3. Get Public Keys
             jwks = await self._get_jwks()
-            
-            # 4. Verify Signature & Claims
-            # python-jose handles searching the JWKS for the matching 'kid'
+
+            # 4. Match kid against JWKS and build key for PyJWT
+            matched = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+            if not matched:
+                raise IdentityException(401, f"No matching JWK for kid={kid}")
+            kty = matched.get("kty")
+            if kty == "RSA":
+                key = RSAAlgorithm.from_jwk(json.dumps(matched))
+            elif kty == "EC":
+                key = ECAlgorithm.from_jwk(json.dumps(matched))
+            else:
+                raise IdentityException(401, f"Unsupported JWK kty={kty}")
+
+            # 5. Verify Signature & Claims
             payload = jwt.decode(
                 token,
-                jwks,
+                key,
                 algorithms=self.algorithms,
                 audience=self.audience,
                 options={
@@ -105,8 +135,8 @@ class OIDCTokenValidator(IdentityValidator):
                     "verify_exp": True
                 }
             )
-            
-            # 5. Construct Identity
+
+            # 6. Construct Identity
             user_identity = UserIdentity(
                 id=payload.get("sub"),
                 email=payload.get("email", payload.get("sub")), # Fallback to sub if email missing
@@ -121,12 +151,14 @@ class OIDCTokenValidator(IdentityValidator):
         except jwt.ExpiredSignatureError:
             logger.info("OIDC Token expired")
             raise IdentityException(401, "Token expired")
-        except jwt.JWTClaimsError as e:
+        except (jwt.InvalidAudienceError, jwt.InvalidIssuerError, jwt.MissingRequiredClaimError) as e:
             logger.warning(f"OIDC Token claims invalid: {e}")
             raise IdentityException(403, f"Invalid claims: {str(e)}")
-        except jwt.JWTError as e:
+        except jwt.InvalidTokenError as e:
             logger.warning(f"OIDC Token signature invalid: {e}")
             raise IdentityException(401, "Invalid token signature")
+        except IdentityException:
+            raise
         except Exception as e:
             logger.error(f"OIDC Validation error: {e}")
             return None

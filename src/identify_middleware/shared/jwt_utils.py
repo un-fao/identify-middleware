@@ -23,7 +23,8 @@ import json
 from functools import lru_cache
 from typing import Mapping, Any, Optional
 import httpx
-from jose import jwt, exceptions
+import jwt
+from jwt.algorithms import ECAlgorithm
 
 try:
     from google.oauth2.id_token import verify_oauth2_token
@@ -120,17 +121,27 @@ def verify_iap_cookie_jwt(iap_jwt_cookie: str, audience: str) -> dict:
     try:
         public_keys = get_iap_public_keys()
         clean_jwt = repair_jwt_padding(iap_jwt_cookie)
+        header = jwt.get_unverified_header(clean_jwt)
+        kid = header.get("kid")
+        if not kid:
+            raise IdentityException(status_code=403, detail="Unauthorized: IAP cookie missing 'kid'")
+        matched = next((k for k in public_keys if k.get("kid") == kid), None)
+        if not matched:
+            raise IdentityException(status_code=403, detail="Unauthorized: IAP cookie 'kid' not found in JWKS")
+        key = ECAlgorithm.from_jwk(json.dumps(matched))
         decoded_jwt = jwt.decode(
             clean_jwt,
-            public_keys,
+            key,
             algorithms=["ES256"],
             audience=audience,
             options={"verify_exp": True, "verify_aud": True}
         )
         return decoded_jwt
-    except exceptions.JWTError as e:
-        logger.warning(f"IAP cookie JWT validation failed (jose): {e}")
-        raise IdentityException(status_code=403, detail=f"Unauthorized: Invalid IAP cookie token") from e
+    except IdentityException:
+        raise
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"IAP cookie JWT validation failed: {e}")
+        raise IdentityException(status_code=403, detail="Unauthorized: Invalid IAP cookie token") from e
     except Exception as e:
         logger.error(f"Unexpected error during IAP cookie JWT validation: {e}")
         raise IdentityException(status_code=500, detail="An unexpected error occurred.") from e
